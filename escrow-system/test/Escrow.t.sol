@@ -17,6 +17,7 @@ contract EscrowTest is Test {
     event EscrowFunded(uint256 indexed escrowId, uint256 amount);
     event FundsReleased(uint256 indexed escrowId, uint256 amount);
     event RefundRequested(uint256 indexed escrowId);
+    event DisputeResolved(uint256 indexed escrowId, bool releasedToSeller);
 
     function setUp() public {
         escrow = new Escrow();
@@ -34,6 +35,15 @@ contract EscrowTest is Test {
         uint256 escrowId = createEscrow();
         vm.prank(buyer);
         escrow.fundEscrow{value: AMOUNT}(escrowId);
+        return escrowId;
+    }
+
+    // Helper function to create, fund, and dispute escrow
+    function createFundAndDisputeEscrow() internal returns (uint256) {
+        uint256 escrowId = createAndFundEscrow();
+        vm.warp(block.timestamp + DEADLINE + 1);
+        vm.prank(buyer);
+        escrow.requestRefund(escrowId);
         return escrowId;
     }
 
@@ -178,10 +188,7 @@ contract EscrowTest is Test {
 
     // Tests for requestRefund
     function test_RequestRefund_Success() public {
-        vm.prank(buyer);
-        uint256 escrowId = escrow.createEscrow(seller, arbiter, AMOUNT, block.timestamp + DEADLINE, "Test Escrow");
-        vm.prank(buyer);
-        escrow.fundEscrow{value: AMOUNT}(escrowId);
+        uint256 escrowId = createAndFundEscrow();
 
         vm.warp(block.timestamp + DEADLINE + 1);
         vm.prank(buyer);
@@ -205,42 +212,97 @@ contract EscrowTest is Test {
         assertEq(address(escrow).balance, AMOUNT, "Contract balance should remain unchanged");
     }
 
-    function test_RequestRefund_FailsWhenNotBuyer() public {
-        vm.prank(buyer);
-        uint256 escrowId = escrow.createEscrow(seller, arbiter, AMOUNT, block.timestamp + DEADLINE, "Test Escrow");
-        vm.prank(buyer);
-        escrow.fundEscrow{value: AMOUNT}(escrowId);
+    function test_RequestRefund_Failures() public {
+        uint256 escrowId = createAndFundEscrow();
 
         vm.warp(block.timestamp + DEADLINE + 1);
         vm.prank(seller);
         vm.expectRevert("Only buyer allowed");
         escrow.requestRefund(escrowId);
-    }
 
-    function test_RequestRefund_FailsWhenEscrowDoesNotExist() public {
         vm.prank(buyer);
         vm.expectRevert("Escrow does not exist");
         escrow.requestRefund(999);
-    }
 
-    function test_RequestRefund_FailsWhenNotFunded() public {
-        vm.prank(buyer);
-        uint256 escrowId = escrow.createEscrow(seller, arbiter, AMOUNT, block.timestamp + DEADLINE, "Test Escrow");
-
+        uint256 unfundedId = createEscrow();
         vm.warp(block.timestamp + DEADLINE + 1);
         vm.prank(buyer);
         vm.expectRevert("Escrow must be in Funded state");
+        escrow.requestRefund(unfundedId);
+
+        vm.prank(buyer);
+        vm.warp(block.timestamp);
+        vm.expectRevert("Deadline not yet passed");
         escrow.requestRefund(escrowId);
     }
 
-    function test_RequestRefund_FailsBeforeDeadline() public {
-        vm.prank(buyer);
-        uint256 escrowId = escrow.createEscrow(seller, arbiter, AMOUNT, block.timestamp + DEADLINE, "Test Escrow");
-        vm.prank(buyer);
-        escrow.fundEscrow{value: AMOUNT}(escrowId);
+    // Tests for resolveDispute
+    function test_ResolveDispute_ReleaseToSeller() public {
+        uint256 escrowId = createFundAndDisputeEscrow();
+        uint256 initialSellerBalance = seller.balance;
+
+        vm.prank(arbiter);
+        vm.expectEmit(true, false, false, true);
+        emit DisputeResolved(escrowId, true);
+        escrow.resolveDispute(escrowId, true);
+
+        (
+            address buyer_,
+            address seller_,
+            address arbiter_,
+            uint256 amount_,
+            ,, Escrow.Status status_,
+            bool isDisputed_
+        ) = escrow.escrows(escrowId);
+        assertEq(uint(status_), uint(Escrow.Status.Released), "Status should be Released");
+        assertFalse(isDisputed_, "Should not be disputed");
+        assertEq(amount_, 0, "Amount should be zero");
+        assertEq(address(escrow).balance, 0, "Contract balance should be zero");
+        assertEq(seller.balance, initialSellerBalance + AMOUNT, "Seller balance mismatch");
+    }
+
+    function test_ResolveDispute_RefundToBuyer() public {
+        uint256 escrowId = createFundAndDisputeEscrow();
+        uint256 initialBuyerBalance = buyer.balance;
+
+        vm.prank(arbiter);
+        vm.expectEmit(true, false, false, true);
+        emit DisputeResolved(escrowId, false);
+        escrow.resolveDispute(escrowId, false);
+
+        (
+            address buyer_,
+            address seller_,
+            address arbiter_,
+            uint256 amount_,
+            ,, Escrow.Status status_,
+            bool isDisputed_
+        ) = escrow.escrows(escrowId);
+        assertEq(uint(status_), uint(Escrow.Status.Refunded), "Status should be Refunded");
+        assertFalse(isDisputed_, "Should not be disputed");
+        assertEq(amount_, 0, "Amount should be zero");
+        assertEq(address(escrow).balance, 0, "Contract balance should be zero");
+        assertEq(buyer.balance, initialBuyerBalance + AMOUNT, "Buyer balance mismatch");
+    }
+
+    function test_ResolveDispute_Failures() public {
+        uint256 escrowId = createFundAndDisputeEscrow();
 
         vm.prank(buyer);
-        vm.expectRevert("Deadline not yet passed");
-        escrow.requestRefund(escrowId);
+        vm.expectRevert("Only arbiter allowed");
+        escrow.resolveDispute(escrowId, true);
+
+        vm.prank(seller);
+        vm.expectRevert("Only arbiter allowed");
+        escrow.resolveDispute(escrowId, true);
+
+        vm.prank(arbiter);
+        vm.expectRevert("Escrow does not exist");
+        escrow.resolveDispute(999, true);
+
+        uint256 nonDisputedId = createAndFundEscrow();
+        vm.prank(arbiter);
+        vm.expectRevert("Escrow must be in Disputed state");
+        escrow.resolveDispute(nonDisputedId, true);
     }
 }

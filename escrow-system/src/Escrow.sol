@@ -47,6 +47,9 @@ contract Escrow is ReentrancyGuard {
     /// @notice Event emitted when a refund is requested
     event RefundRequested(uint256 indexed escrowId);
 
+    /// @notice Event emitted when a dispute is resolved
+    event DisputeResolved(uint256 indexed escrowId, bool releasedToSeller);
+
     /// @notice Modifier to restrict access to the buyer of an escrow
     modifier onlyBuyer(uint256 escrowId) {
         require(msg.sender == escrows[escrowId].buyer, "Only buyer allowed");
@@ -126,7 +129,7 @@ contract Escrow is ReentrancyGuard {
 
         uint256 amount = escrow.amount;
         escrow.status = Status.Released;
-        escrow.amount = 0; 
+        escrow.amount = 0; // Prevent reentrancy by clearing amount first
 
         (bool success, ) = escrow.seller.call{value: amount}("");
         require(success, "Transfer to seller failed");
@@ -145,5 +148,30 @@ contract Escrow is ReentrancyGuard {
         escrow.status = Status.Disputed;
         escrow.isDisputed = true;
         emit RefundRequested(escrowId);
+    }
+
+    /// @notice Resolves a disputed escrow by releasing funds to the seller or refunding the buyer
+    /// @param escrowId The ID of the escrow to resolve
+    /// @param releaseToSeller True to release funds to the seller, false to refund the buyer
+    function resolveDispute(uint256 escrowId, bool releaseToSeller) external onlyArbiter(escrowId) nonReentrant {
+        EscrowDetails storage escrow = escrows[escrowId];
+        require(escrow.buyer != address(0), "Escrow does not exist");
+        require(escrow.status == Status.Disputed, "Escrow must be in Disputed state");
+
+        uint256 amount = escrow.amount;
+        escrow.amount = 0; // Prevent reentrancy by clearing amount first
+
+        if (releaseToSeller) {
+            escrow.status = Status.Released;
+            (bool success, ) = escrow.seller.call{value: amount}("");
+            require(success, "Transfer to seller failed");
+        } else {
+            escrow.status = Status.Refunded;
+            (bool success, ) = escrow.buyer.call{value: amount}("");
+            require(success, "Transfer to buyer failed");
+        }
+
+        escrow.isDisputed = false;
+        emit DisputeResolved(escrowId, releaseToSeller);
     }
 }
