@@ -16,5 +16,3 @@ remappings = [
 
 [profile.test]
 src = "test"
-
-[profile.default]
