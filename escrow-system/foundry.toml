@@ -10,5 +10,11 @@ optimizer_runs = 200
 gas_reports = ["*"]      
 auto_detect_solc = false  
 
+remappings = [
+  "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+]
+
 [profile.test]
 src = "test"
+
+[profile.default]
